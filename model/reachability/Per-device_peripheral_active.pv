@@ -1,0 +1,603 @@
+(*
+    This is the model of BLE privacy when a target BLE device (Alice) adopts the
+    per-device design for her identifiers.
+    In this model, Alice is the peripheral role, she does not communicate with another BLE device.
+    Alice always use resolvable private addresses (RPAs),
+    The tracker is active and she can probes Alice.
+    The tracker and Alice have three relations, never paired, currently paired,
+    previously paired but now unpaired.
+    The tracker intends to identify Alice using public key, LTK, IRK, CSRK, and ID_ADDR.
+    This model is tested with ProVerif 2.04
+*)
+
+(* open channel for data communication *)
+free ble_ch: channel.
+free bc_ch: channel.
+
+(* secure oob channel between A and B *)
+free oob_in_AB: channel [private].
+free oob_out_AB: channel [private].
+
+(* secure oob channel between A and C *)
+free oob_in_AC: channel [private].
+free oob_out_AC: channel [private].
+
+(* type defination *)
+type random_num.
+type public_key.
+type private_key.
+type dhkey.
+type mackey.
+type key.
+type bt_addr.
+type iocap.
+type nonce.
+type tag.
+
+(* tags *)
+free tA: tag.
+free tB: tag.
+
+(* BLE constant value *)
+const zero: random_num.
+const one: bitstring.
+const btle: bitstring.
+const SALT: bitstring.
+const L256: bitstring.
+
+(* Database for storing generated keys during pairing *)
+table tab_ltk_paired_A(bt_addr, key).
+table tab_ltk_valid_A(bt_addr, key).
+table tab_ltk_B(bt_addr, key).
+table tab_ltk_C(bt_addr, key).
+
+(* Database for storing IRK *)
+table tab_irk_paired_A(bt_addr, key).
+table tab_irk_valid_A(bt_addr, key).
+table tab_irk_B(bt_addr, key).
+table tab_irk_C(bt_addr, key).
+
+(* Database for Alice's information *)
+table tab_info_A(bt_addr, key, key).
+table tab_conn_csrk_A(key).
+table tab_conn_ltk_A(key).
+
+(* Database for Bob's information *)
+table tab_info_B(bt_addr, key, key).
+table tab_conn_csrk_B(key).
+table tab_conn_ltk_B(key).
+
+(* Database for storing CSRK *)
+table tab_csrk_paired_A(bt_addr, key).
+table tab_csrk_valid_A(bt_addr, key).
+table tab_csrk_B(bt_addr, key).
+table tab_csrk_C(bt_addr, key).
+
+(* BLE device's identity address *)
+free id_addr_A: bt_addr [private].
+free id_addr_B: bt_addr [private].
+free id_addr_C: bt_addr [private].
+
+(* Fixed irks and csrks *)
+free IRKA: key [private].
+free CSRKA: key [private].
+free IRKB: key[private].
+free CSRKB: key[private].
+free IRKC: key [private].
+free CSRKC: key [private].
+
+(* io capabilities *)
+free iocap_A: iocap.
+free iocap_B: iocap.
+free iocap_C: iocap.
+
+(* adv packets *)
+free adva: bitstring.
+(* connectable adv packets *)
+free conn_adva: bitstring.
+(* connection request *)
+free conn_req: bitstring.
+(* scan req *)
+free scan_req: bitstring.
+(* scan rsp *)
+free scan_rsp: bitstring.
+(* paging req *)
+free page_req: bitstring.
+(* paging rsp *)
+free page_rsp: bitstring.
+(* ble request/response *)
+free ble_req: bitstring [private].
+free ble_rsp: bitstring [private].
+
+free signed_ack: bitstring.
+
+(* Type conversion helper functions *)
+fun random_num2key(random_num): key [typeConverter].
+fun dhkey2key(dhkey): key [typeConverter].
+fun mackey2key(mackey): key [typeConverter].
+fun bitstring2key(bitstring): key [typeConverter].
+fun key2bitstring(key): bitstring [typeConverter].
+fun bitstring2nonce(bitstring): nonce [typeConverter].
+fun pubkey2bitstring(public_key): bitstring [typeConverter].
+fun random2bitstring(random_num): bitstring [typeConverter].
+fun btaddr2bitstring(bt_addr): bitstring [typeConverter].
+fun iocap2bitstring(iocap): bitstring [typeConverter].
+fun nonce2bitstring(nonce): bitstring [typeConverter].
+fun dhkey2bitstring(dhkey): bitstring [typeConverter].
+fun bitstring2mackey(bitstring): mackey [typeConverter].
+fun bitstring2btaddr(bitstring): bt_addr [typeConverter].
+
+(* Concatenation helper functions *)
+fun concat(bitstring, bitstring): bitstring.
+fun first_part(bitstring): bitstring.
+fun last_part(bitstring): bitstring.
+equation forall b1: bitstring, b2: bitstring; first_part(concat(b1, b2)) = b1.
+equation forall b1: bitstring, b2: bitstring; last_part(concat(b1, b2)) = b2.
+
+(* BLE defined functions from bluetooth spec *)
+fun AES_CMAC(key, bitstring): bitstring.
+
+(* function to derive session key from LTK *)
+letfun ltk2sessionk(k: bitstring, b: bitstring) = bitstring2key(AES_CMAC(bitstring2key(k), b)).
+
+(* cryptographic functions defined in spec *)
+letfun f4(pk1: public_key, pk2: public_key, r1: random_num, r2: random_num) =
+    AES_CMAC(random_num2key(r1), concat(concat(pubkey2bitstring(pk1), pubkey2bitstring(pk2)), random2bitstring(r2))).
+
+letfun f5(dhk: dhkey, r1: random_num, r2: random_num, bt1: bt_addr, bt2: bt_addr) =
+    let T = AES_CMAC(bitstring2key(SALT), dhkey2bitstring(dhk)) in
+    let mkey = AES_CMAC(bitstring2key(T), concat(concat(concat(concat(concat(concat(random2bitstring(zero), btle), random2bitstring(r1)), random2bitstring(r2)), btaddr2bitstring(bt1)), btaddr2bitstring(bt2)), L256)) in
+    let ltk = AES_CMAC(bitstring2key(T), concat(concat(concat(concat(concat(concat(one, btle), random2bitstring(r1)), random2bitstring(r2)), btaddr2bitstring(bt1)), btaddr2bitstring(bt2)), L256)) in
+    (bitstring2mackey(mkey), bitstring2key(ltk)).
+
+letfun f6(mkey: mackey, r1: random_num, r2: random_num, r3: random_num, i: iocap, bt1: bt_addr, bt2: bt_addr) =
+AES_CMAC(mackey2key(mkey), concat(concat(concat(concat(concat(random2bitstring(r1), random2bitstring(r2)), random2bitstring(r3)), iocap2bitstring(i)), btaddr2bitstring(bt1)), btaddr2bitstring(bt2))).
+
+(* Deffie-Hellman key exchange *)
+type G.
+type exponent.
+const gen: G.
+fun p256(G, exponent): G.
+equation forall x: exponent, y: exponent; p256(p256(gen, x), y) = p256(p256(gen, y), x).
+
+fun exponent2private_key(exponent): private_key [typeConverter].
+fun private_key2exponent(private_key): exponent [typeConverter].
+fun G2public_key(G): public_key [typeConverter].
+fun public_key2G(public_key): G [typeConverter].
+fun G2dhkey(G): dhkey [typeConverter].
+
+(* private key to public key *)
+letfun get_pub_key(pri_k: private_key) = G2public_key(p256(gen, private_key2exponent(pri_k))).
+
+(* dhkey calculation *)
+letfun get_dhkey(pub_k: public_key, pri_k: private_key) = G2dhkey(p256(public_key2G(pub_k), private_key2exponent(pri_k))).
+
+(* symmetric encryption *)
+fun AES_CCM(bitstring, key, nonce): bitstring.
+reduc forall m: bitstring, k: key, n: nonce; sdec(AES_CCM(m, k, n), k, n) = m.
+
+fun AES(bitstring, key): bitstring.
+reduc forall m: bitstring, k: key; deAES(AES(m, k), k) = m.
+
+(* function to generate a random address *)
+fun mod24(bitstring): bitstring.
+letfun ah(m: bitstring, k: key) = mod24(AES(m, k)).
+
+(* BLE pairing events *)
+event finish_alice_scan.
+event finish_bob_scan.
+event finish_alice_connect.
+event finish_bob_connect.
+event finish_alice_encrypt.
+event finish_bob_encrypt.
+event finish_alice_sign.
+event finish_bob_sign.
+
+(* privacy violation events *)
+event alice_send(bitstring).
+event alice_receive(bitstring).
+event charlie_send(bitstring).
+event charlie_receive(bitstring).
+
+(* set input/output as precise as described *)
+set preciseActions = true.
+set attacker = passive.
+
+let Alice_pair(irk_A: key, csrk_A: key) =
+(
+    new exp_A: exponent;
+    let pri_A = exponent2private_key(exp_A) in
+
+    (* generate a new random address *)
+    new prand: bitstring;
+    let hash_prand: bitstring = ah(prand, irk_A) in
+    let addr_A: bt_addr = bitstring2btaddr(concat(hash_prand, prand)) in
+
+    (* step 1 public key exchange central *)
+    let pk_A: public_key = get_pub_key(pri_A) in
+    in(ble_ch, (addr_B: bt_addr, pk_B: public_key));
+    event alice_receive((addr_B, pk_B));
+    out(ble_ch, (addr_A, pk_A));
+    event alice_send((addr_A, pk_A));
+    let dhkey_AB: dhkey = get_dhkey(pk_B, pri_A) in
+
+    (* step 2 auth 1 oob, central inputs and outputs *)
+    new ra: random_num;
+    let ca: bitstring = f4(pk_A, pk_A, ra, zero) in
+    in(oob_in_AB, (addr_BB: bt_addr, rb: random_num, cb: bitstring));
+    out(oob_out_AB, (addr_A, ra, ca));
+    if cb = f4(pk_B, pk_B, rb, zero) then
+    new na: random_num;
+    in(ble_ch, nb: random_num);
+    event alice_receive(random2bitstring(nb));
+    out(ble_ch, na);
+    event alice_send(random2bitstring(na));
+
+    (* step 3 auth2 central *)
+    let (mkey: mackey, ltk: key) = f5(dhkey_AB, na, nb, addr_A, addr_B) in
+    let ea: bitstring = f6(mkey, na, nb, rb, iocap_A, addr_A, addr_B) in
+    in(ble_ch, eb: bitstring);
+    event alice_receive(eb);
+    if eb = f6(mkey, nb, na, ra, iocap_B, addr_B, addr_A) then
+    out(ble_ch, ea);
+    event alice_send(ea);
+
+    (*  key (IRK and ID_Addr) distribution *)
+    new skdm: bitstring;
+    new ivm: bitstring;
+    in(ble_ch, (skds: bitstring, ivs: bitstring));
+    event alice_receive((skds, ivs));
+    out(ble_ch, (skdm, ivm));
+    event alice_send((skdm, ivm));
+    (* derive session key from LTK *)
+    let session_k: key = ltk2sessionk(key2bitstring(ltk), concat(skds, skdm)) in
+    let session_n = bitstring2nonce(concat(ivs, ivm)) in
+    (* send IRK, ID_addr, and CSRK *)
+    in(ble_ch, d: bitstring);
+    event alice_receive(d);
+    let encdat = AES_CCM((tA, irk_A, id_addr_A, csrk_A), session_k, session_n) in
+    out(ble_ch, encdat);
+    event alice_send(encdat);
+    let (=tB, irk_B: key, idaddr_B: bt_addr, csrk_B: key) = sdec(d, session_k, session_n) in
+    insert tab_info_A(id_addr_A, irk_A, csrk_A);
+    insert tab_ltk_paired_A(idaddr_B, ltk);
+    insert tab_irk_paired_A(idaddr_B, irk_B);
+    insert tab_csrk_paired_A(idaddr_B, csrk_B)
+).
+
+let Charlie_pair(pri_C: private_key, irk_C: key, csrk_C: key) =
+(
+    (* use fixed identity address *)
+    let addr_C = id_addr_C in
+
+    (* step 1 public key exchange peripheral *)
+    let pk_C = get_pub_key(pri_C) in
+    out(ble_ch, (addr_C, pk_C));
+    in(ble_ch, (addr_A: bt_addr, pk_A: public_key));
+    let dhkey_BA = get_dhkey(pk_A, pri_C) in
+
+    (* step 2 auth 1 oob, peripheral inputs and outputs *)
+    new rb: random_num;
+    let cb = f4(pk_C, pk_C, rb, zero) in
+    out(oob_in_AB, (addr_C, rb, cb));
+    in(oob_out_AB, (addr_AA: bt_addr, ra: random_num, ca: bitstring));
+    if ca = f4(pk_A, pk_A, ra, zero) then
+    new nb: random_num;
+    out(ble_ch, nb);
+    in(ble_ch, na: random_num);
+
+    (* step 3 auth2 peripheral *)
+    let (mkey: mackey, ltk: key) = f5(dhkey_BA, na, nb, addr_A, addr_C) in
+    let eb = f6(mkey, nb, na, ra, iocap_B, addr_C, addr_A) in
+    out(ble_ch, eb);
+    in(ble_ch, ea: bitstring);
+    if ea = f6(mkey, na, nb, rb, iocap_A, addr_A, addr_C) then
+
+    (* derive session key from LTK *)
+    new skds: bitstring;
+    new ivs: bitstring;
+    out(ble_ch, (skds, ivs));
+    in(ble_ch, (skdm: bitstring, ivm: bitstring));
+    (* derive session key from LTK *)
+    let session_k = ltk2sessionk(key2bitstring(ltk), concat(skds, skdm)) in
+    let session_n = bitstring2nonce(concat(ivs, ivm)) in
+    out(ble_ch, AES_CCM((tB, irk_C, id_addr_C, csrk_C), session_k, session_n));
+    in(ble_ch, d: bitstring);
+    let (=tA, irk_A: key, idaddr_A: bt_addr, csrk_A: key) = sdec(d, session_k, session_n) in
+    (* store keys from A *)
+    insert tab_ltk_C(idaddr_A, ltk);
+    insert tab_irk_C(idaddr_A, irk_A);
+    insert tab_csrk_C(idaddr_A, csrk_A)
+).
+
+let Alice_BC_paging() =
+(
+    in(bc_ch, (=tB, sender: bt_addr, payload: bitstring));
+    event alice_receive((sender, payload));
+    let receiver = bitstring2btaddr(first_part(payload)) in
+    let req = last_part(payload) in
+    (* BLE's identity address is the same as BC's MAC address*)
+    if receiver = id_addr_A && req = page_req then
+    let payload1 = concat(btaddr2bitstring(sender), page_rsp) in
+    out(bc_ch, (tA, id_addr_A, payload1));
+    event alice_send((id_addr_A, payload1))
+).
+
+(* Remove stored keys related to target MAC address (identity address) *)
+(* Use a random address if don't unpair with any devices *)
+let Alice_unpair(addr: bt_addr) =
+(
+    get tab_ltk_paired_A(add1, ltk) in
+    if add1 <> addr then
+    insert tab_ltk_valid_A(add1, ltk);
+    get tab_irk_paired_A(add2, irk) in
+    if add2 <> addr then
+    insert tab_irk_valid_A(add2, irk);
+    get tab_csrk_paired_A(add3, csrk) in
+    if add3 <> addr then
+    insert tab_csrk_valid_A(add3, csrk)
+).
+
+let Alice_scan_response() =
+(
+    get tab_info_A(idaddr: bt_addr, irk_A: key, csrk_A: key) in
+    (* generate a new random address *)
+    new prand: bitstring;
+    let hash_prand = ah(prand, irk_A) in
+    let addr_A = bitstring2btaddr(concat(hash_prand, prand)) in
+    (* advertise *)
+    out(ble_ch, (tA, addr_A, adva));
+    event alice_send((addr_A, adva));
+    (* receive scan req *)
+    in(ble_ch, (=tB, addr_B1: bt_addr, payload: bitstring));
+    ifdef(`FIXSCAN',
+    `',
+    `event alice_receive((addr_B1, payload));')
+    let receiver: bt_addr = bitstring2btaddr(first_part(payload)) in
+    let req: bitstring = last_part(payload) in
+    if req = scan_req && receiver = addr_A then
+    out(ble_ch, (tA, addr_A, scan_rsp));
+    ifdef(`FIXSCAN',
+    `',
+    `event alice_send((addr_A, scan_rsp));')
+    event finish_alice_scan
+).
+
+let Alice_receive_connection() =
+(
+    get tab_info_A(idaddr: bt_addr, irk_A: key, csrk_A: key) in
+    (* generate a new random address *)
+    new prand: bitstring;
+    let hash_prand = ah(prand, irk_A) in
+    let addr_A = bitstring2btaddr(concat(hash_prand, prand)) in
+    (* advertise *)
+    out(ble_ch, (tA, addr_A, conn_adva));
+    ifdef(`FIXCONN',
+    `',
+    `event alice_send((addr_A, conn_adva));')
+    (* receive conn request *)
+    in(ble_ch, (=tB, addr_B1: bt_addr, payload: bitstring));
+    event alice_receive((addr_B1, payload));
+    let receiver: bt_addr = bitstring2btaddr(first_part(payload)) in
+    let req: bitstring = last_part(payload) in
+    if req = conn_req && receiver = addr_A then
+    get tab_csrk_valid_A(=addr_B1, csrk_B) in
+    insert tab_conn_csrk_A(csrk_B);
+    get tab_ltk_valid_A(=addr_B1, ltk: key) in
+    insert tab_conn_ltk_A(ltk);
+    event finish_alice_connect
+).
+
+let Alice_encrypted_receive() =
+(
+    get tab_conn_ltk_A(ltk: key) in
+    (* start encryption *)
+    new skds: bitstring;
+    new ivs: bitstring;
+    in(ble_ch, (=tB, skdm: bitstring, ivm: bitstring));
+    event alice_receive((skdm, ivm));
+    out(ble_ch, (tA, skds, ivs));
+    event alice_send((skds, ivs));
+    (* derive session key from LTK *)
+    let session_k: key = ltk2sessionk(key2bitstring(ltk), concat(skdm, skds)) in
+    let session_n = bitstring2nonce(concat(ivm, ivs)) in
+    in(ble_ch, (=tB, d: bitstring));
+    let (=tB, req: bitstring) = sdec(d, session_k, session_n) in
+    event alice_receive(d);
+    if req = ble_req then
+    let encdata = AES_CCM((tA, ble_rsp), session_k, session_n) in
+    out(ble_ch, (tA, encdata));
+    event alice_send(encdata);
+
+    (* event finish *)
+    event finish_alice_encrypt
+).
+
+let Alice_recv_signed_data() =
+(
+    get tab_conn_csrk_A(csrk: key) in
+    in(ble_ch, (=tB, signed: bitstring));
+    event alice_receive(signed);
+
+    let msg: bitstring = first_part(first_part(signed)) in
+    let ct: bitstring = last_part(first_part(signed)) in
+    let mac: bitstring = last_part(signed) in
+    if mac = AES_CMAC(csrk, concat(msg, ct)) then
+    event finish_alice_sign
+).
+
+(* Since eavesdropping a packet from a public channel using "in" would "consume" this packet, an attacker would always intercept one packet if we leverage "in" to eavesdropping this packet.
+To avoid this, we make the attacker send (using "out") exactly the same eavesdropped (using "in") packet to the same channel after receiving it. *)
+let active_attacker_resolveMAC() =
+(
+    (* receive advertisement *)
+    in(ble_ch, (=tA, addr_A: bt_addr, adv: bitstring));
+    (* scan request *)
+    let payload: bitstring = concat(btaddr2bitstring(addr_A), scan_req) in
+    out(ble_ch, (tB, id_addr_C, payload));
+    event charlie_send((id_addr_C, payload));
+    (* receive scan response *)
+    (* attack based on IRK, an attacker can track a device if she can resolve its RPA *)
+    in(ble_ch, (=tA, addr1: bt_addr, payload1: bitstring));
+    if payload1 = scan_rsp then
+    let hash = first_part(btaddr2bitstring(addr1)) in
+    let rand = last_part(btaddr2bitstring(addr1)) in
+    get tab_irk_C(ad, irk) in
+    if hash = ah(rand, irk) then
+    event charlie_receive((addr1, payload1))
+).
+
+let active_attacker_decrypt()=
+(
+    (* attack based on LTK *)
+    (* if an attacker can decrypt an encrypted message with an LTK, that means the device and the attacker share the same LTK *)
+    get tab_ltk_C(ad: bt_addr, ltk: key) in
+    (* receive advertisement *)
+    in(ble_ch, (=tA, addr_A: bt_addr, adv: bitstring));
+    let payload: bitstring = concat(btaddr2bitstring(addr_A), conn_req) in
+    (* send conn req *)
+    out(ble_ch, (tB, id_addr_C, payload));
+    new skdm: bitstring;
+    new ivm: bitstring;
+    out(ble_ch, (tB, skdm, ivm));
+    in(ble_ch, (=tA, skds: bitstring, ivs: bitstring));
+    let session_k = ltk2sessionk(key2bitstring(ltk), concat(skdm, skds)) in
+    let session_n = bitstring2nonce(concat(ivm, ivs)) in
+    let encdata = AES_CCM((tB, ble_req), session_k, session_n) in
+    out(ble_ch, (tB, encdata));
+    event charlie_send(encdata);
+    in(ble_ch, (=tA, d: bitstring));
+    let (=tA, rsp: bitstring) = sdec(d, session_k, session_n) in
+    event charlie_receive(d)
+).
+
+let active_attacker_check_signature() =
+(
+    (* receive advertisement *)
+    in(ble_ch, (=tA, addr_A: bt_addr, adv: bitstring));
+    let payload: bitstring = concat(btaddr2bitstring(addr_A), conn_req) in
+    (* send conn req *)
+    out(ble_ch, (tB, id_addr_C, payload));
+    event charlie_send((id_addr_C, payload));
+    in(ble_ch, (=tA, signed: bitstring));
+    let msg: bitstring = first_part(first_part(signed)) in
+    let ct: bitstring = last_part(first_part(signed)) in
+    let cmac: bitstring = last_part(signed) in
+    get tab_csrk_C(addr: bt_addr, csrk: key) in
+    if cmac = AES_CMAC(csrk, concat(msg, ct)) then
+    event charlie_receive(signed)
+).
+
+let active_attacker_prob() =
+(
+    let addr_C = id_addr_C in
+    get tab_irk_C(add: bt_addr, irk: key) in
+    let payload = concat(btaddr2bitstring(add), page_req) in
+    out(bc_ch, (tB, addr_C, payload));
+    event charlie_send((addr_C, payload));
+    in(bc_ch, (=tA, addr: bt_addr, data: bitstring));
+    let ad = bitstring2btaddr(first_part(data)) in
+    if ad = addr_C then
+    event charlie_receive((addr, data))
+).
+
+let active_attacker_pair(pri_B: private_key, irk_B: key, csrk_B: key) =
+(
+    (* use fixed identity address *)
+    let addr_B = id_addr_B in
+
+    (* step 1 public key exchange peripheral *)
+    let pk_B = get_pub_key(pri_B) in
+    out(ble_ch, (addr_B, pk_B));
+    in(ble_ch, (addr_A: bt_addr, pk_A: public_key));
+    let dhkey_BA = get_dhkey(pk_A, pri_B) in
+
+    (* step 2 auth 1 oob, peripheral inputs and outputs *)
+    new rb: random_num;
+    let cb = f4(pk_B, pk_B, rb, zero) in
+    out(oob_in_AB, (addr_B, rb, cb));
+    in(oob_out_AB, (addr_AA: bt_addr, ra: random_num, ca: bitstring));
+    if ca = f4(pk_A, pk_A, ra, zero) then
+    new nb: random_num;
+    out(ble_ch, nb);
+    in(ble_ch, na: random_num);
+
+    (* step 3 auth2 peripheral *)
+    let (mkey: mackey, ltk: key) = f5(dhkey_BA, na, nb, addr_A, addr_B) in
+    let eb = f6(mkey, nb, na, ra, iocap_B, addr_B, addr_A) in
+    out(ble_ch, eb);
+    event charlie_send(eb);
+    in(ble_ch, ea: bitstring);
+    if ea = f6(mkey, na, nb, rb, iocap_A, addr_A, addr_B) then
+
+    (* derive session key from LTK *)
+    new skds: bitstring;
+    new ivs: bitstring;
+    out(ble_ch, (skds, ivs));
+    in(ble_ch, (skdm: bitstring, ivm: bitstring));
+    (* derive session key from LTK *)
+    let session_k = ltk2sessionk(key2bitstring(ltk), concat(skds, skdm)) in
+    let session_n = bitstring2nonce(concat(ivs, ivm)) in
+    out(ble_ch, AES_CCM((tB, irk_B, id_addr_B, csrk_B), session_k, session_n));
+    in(ble_ch, d: bitstring);
+    let (=tA, irk_A: key, idaddr_A: bt_addr, csrk_A: key) = sdec(d, session_k, session_n) in
+    get tab_irk_C(idadd, k) in
+    ifdef(`PKIDADDR',
+    `if idaddr_A = idadd then
+    event charlie_receive(d);'
+    )
+    ifdef(`PKIRK',
+    `if k = irk_A then
+    event charlie_receive(d);'
+    )
+    ifdef(`PKCSRK',
+    `get tab_csrk_C(idad1, csrk) in
+    if csrk_A = csrk then
+    event charlie_receive(d);'
+    )
+    0
+).
+
+(* privacy violation query, whether received packet can be recognized by an attacker *)
+query data1: bitstring, data2: bitstring; event(charlie_send(data1)) && event(alice_receive(data1)) && event(alice_send(data2)) && event(charlie_receive(data2)).
+
+process
+new exp_C: exponent;
+new exp_Att: exponent;
+let pri_C = exponent2private_key(exp_C) in
+let pri_Att = exponent2private_key(exp_Att) in
+new irk_A: key;
+new idad: bt_addr;
+(* using per-device irk, csrk, and id_addr *)
+ifdef(`BLENEVERCSRK',
+    `(Alice_pair(irk_A, CSRKA)) | ((Alice_unpair(idad))) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_check_signature()')
+ifdef(`BLENEVERLTK',
+    `(Alice_pair(irk_A, CSRKA)) | ((Alice_unpair(idad))) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_decrypt()')
+ifdef(`BLENEVERIRK',
+    `(Alice_pair(irk_A, CSRKA)) | ((Alice_unpair(idad))) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_resolveMAC()')
+ifdef(`BLENEVERPK',
+    `(Alice_pair(irk_A, CSRKA)) | ((Alice_unpair(idad))) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_pair(pri_Att, IRKB, CSRKB)')
+ifdef(`BCBLENEVERID',
+    `(Alice_pair(irk_A, CSRKA)) | ((Alice_unpair(idad))) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | Alice_BC_paging() | active_attacker_prob()')
+
+ifdef(`BLEPAIREDCSRK',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(idad))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_check_signature()')
+ifdef(`BLEPAIREDLTK',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(idad))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_decrypt()')
+ifdef(`BLEPAIREDIRK',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(idad))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_resolveMAC()')
+ifdef(`BLEPAIREDPK',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(idad))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_pair(pri_Att, IRKB, CSRKB)')
+ifdef(`BCBLEPAIREDID',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(idad))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | Alice_BC_paging() | active_attacker_prob()')
+
+ifdef(`BLEUNPAIREDCSRK',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(id_addr_C))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_check_signature()')
+ifdef(`BLEUNPAIREDLTK',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(id_addr_C))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_decrypt()')
+ifdef(`BLEUNPAIREDIRK',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(id_addr_C))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_resolveMAC()')
+ifdef(`BLEUNPAIREDPK',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(id_addr_C))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | active_attacker_pair(pri_Att, IRKB, CSRKB)')
+ifdef(`BCBLEUNPAIREDID',
+    `(Alice_pair(irk_A, CSRKA)) | (Charlie_pair(pri_C, IRKC, CSRKC)) | phase 1; ((Alice_unpair(id_addr_C))) | phase 2; Alice_pair(irk_A, CSRKA) | Alice_receive_connection() | (Alice_scan_response()) | (Alice_encrypted_receive()) | Alice_recv_signed_data() | Alice_BC_paging() | active_attacker_prob()')
